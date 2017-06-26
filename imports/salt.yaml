@@ -1,0 +1,160 @@
+imports:
+  - https://raw.githubusercontent.com/cloudify-cosmo/cloudify-fabric-plugin/1.4.2/plugin.yaml
+
+relationships:
+
+  cloudify.relationships.Salt.connected_to:
+    derived_from: cloudify.relationships.depends_on
+    source_interfaces:
+      cloudify.interfaces.relationship_lifecycle:
+        postconfigure: scripts/salt/minion/postconfigure.py
+    target_interfaces:
+      cloudify.interfaces.relationship_lifecycle:
+        preconfigure:
+          implementation: fabric.fabric_plugin.tasks.run_task
+          inputs:
+            tasks_file:
+              default: tasks/salt/master/tasks.py
+            task_name:
+              default: preconfigure
+            fabric_env:
+              default: &master_fabric_env
+                host_string: { get_attribute: [ master_host, ip ] }
+                user: { get_input: agent_user }
+                key: { get_secret: agent_key_private }
+        establish:
+          implementation: fabric.fabric_plugin.tasks.run_task
+          inputs:
+            tasks_file:
+              default: tasks/salt/master/tasks.py
+            task_name:
+              default: establish
+            fabric_env:
+              default: *master_fabric_env
+
+node_types:
+
+  cloudify.nodes.Salt:
+    derived_from: cloudify.nodes.Root
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        create:
+          implementation: scripts/salt/minion/create.py
+
+  cloudify.nodes.Salt.Master:
+    derived_from: cloudify.nodes.Salt
+    properties:
+      use_external_resource:
+        default: false
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        create:
+          implementation: fabric.fabric_plugin.tasks.run_task
+          inputs:
+            tasks_file:
+              default: tasks/salt/master/tasks.py
+            task_name:
+              default: create
+            fabric_env:
+              default: *master_fabric_env
+        configure:
+          implementation: fabric.fabric_plugin.tasks.run_task
+          inputs:
+            tasks_file:
+              default: tasks/salt/master/tasks.py
+            task_name:
+              default: configure
+            task_properties:
+              default:
+                resource_config:
+                  open_mode: True
+                  auto_accept: True
+                  interface: { get_attribute: [ master_host, ip ] }
+                  file_roots:
+                    'base':
+                    - /srv/salt
+                    - /srv/salt/bin
+                  pillar_roots:
+                    'base':
+                    - /srv/pillar
+                  reactor:
+                  - 'salt/minion/*/start':
+                    - /srv/reactor/kubernetes/highstate-new.sls
+                    - /srv/reactor/kubernetes/highstate-minions.sls
+                    - /srv/reactor/kubernetes/highstate-masters.sls
+            fabric_env:
+              default: *master_fabric_env
+
+node_templates:
+
+  salt_master:
+    type: cloudify.nodes.Salt.Master
+    relationships:
+      - type: cloudify.relationships.depends_on
+        target: master_host
+
+  kubernetes_master_salt_minion:
+    type: cloudify.nodes.Salt
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        configure:
+          implementation: scripts/salt/minion/configure.py
+          inputs:
+            resource_config:
+              master: { get_attribute: [ master_host, ip ] }
+              master_finger: { get_attribute: [ salt_master, master_finger ] }
+              etcd_servers: { get_attribute: [ kubernetes_master_minion_host, ip ] }
+              os_family: RedHat
+              roles:
+                - kubernetes-master
+              # node_ip: { get_attribute: [ kubernetes_master_minion_host, ip ] }
+              # cbr-cidr: $MASTER_IP_RANGE
+              # publicAddressOverride: { get_attribute: [ kubernetes_master_minion_host, ip ] }
+              # network_mode: openvswitch
+              # networkInterfaceName: eth0
+              # api_servers: { get_attribute: [ kubernetes_master_minion_host, ip ] }
+              # cloud: openstack
+              # cloud_config: /srv/kubernetes/openstack.conf
+              # runtime_config: ""
+              master_extra_sans: "DNS:kubernetes,DNS:kubernetes.default,DNS:kubernetes.default.svc,DNS:kubernetes.default.svc.cluster.local,DNS:kubernetes-master"
+              keep_host_etcd: true
+              kube_user: { get_input: agent_user }
+
+    relationships:
+      - type: cloudify.relationships.contained_in
+        target: kubernetes_master_minion_host
+      - type: cloudify.relationships.Salt.connected_to
+        target: salt_master
+
+  kubernetes_pool_salt_minion:
+    type: cloudify.nodes.Salt
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        configure:
+          implementation: scripts/salt/minion/configure.py
+          inputs:
+            resource_config:
+              master: { get_attribute: [ master_host, ip ] }
+              master_finger: { get_attribute: [ salt_master, master_finger ] }
+              etcd_servers: { get_attribute: [ kubernetes_master_minion_host, ip ] }
+              os_family: RedHat
+              roles:
+                - kubernetes-pool
+              # node_ip: { get_attribute: [ kubernetes_master_minion_host, ip ] }
+              # cbr-cidr: $MASTER_IP_RANGE
+              # publicAddressOverride: { get_attribute: [ kubernetes_master_minion_host, ip ] }
+              # network_mode: openvswitch
+              # networkInterfaceName: eth0
+              # api_servers: { get_attribute: [ kubernetes_master_minion_host, ip ] }
+              # cloud: openstack
+              # cloud_config: /srv/kubernetes/openstack.conf
+              # runtime_config: ""
+              docker_opts: "--bridge=cbr0 --iptables=false --ip-masq=false"
+              master_extra_sans: "DNS:kubernetes,DNS:kubernetes.default,DNS:kubernetes.default.svc,DNS:kubernetes.default.svc.cluster.local,DNS:kubernetes-master"
+              keep_host_etcd: true
+              kube_user: { get_input: agent_user }
+    relationships:
+      - type: cloudify.relationships.contained_in
+        target: kubernetes_node_minion_host
+      - type: cloudify.relationships.Salt.connected_to
+        target: salt_master
